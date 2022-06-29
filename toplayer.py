@@ -23,7 +23,7 @@ def jitted_loop(X, w, kernel_size: int, h: int):
 
     return X_out
 
-class TopoLayerNaive(nn.Module):
+class TopLayer(nn.Module):
     """This class implements a topographic layer via a naive, baseline algorithm.
     
     It is a drop-in replacement of torch.nn.Conv2d
@@ -45,6 +45,9 @@ class TopoLayerNaive(nn.Module):
 
         self.prepare_weights()
 
+    def extra_repr(self):
+        return f"channels_in={self.channels_in}, channels_out={self.channels_out}, kernel_size={self.kernel_size}, stride={self.stride}, h={self.h}"
+
     def prepare_weights(self):
         # variance = 2.0 / (fan-in +fan-out)
         # stddev = sqrt(variance)
@@ -63,9 +66,11 @@ class TopoLayerNaive(nn.Module):
         self.idxs0 = None
         self.idxs1 = None
 
-    def forward(self, X, method='naive'):
+    def forward(self, X, method='tiled'):
         # Pad X
-        assert self.h == X.shape[2] and X.shape[1] == self.channels_in and self.kernel_size % 2 == 1
+        assert self.h == X.shape[2]
+        assert X.shape[1] == self.channels_in
+        assert self.kernel_size % 2 == 1
         pad_size = (self.kernel_size - 1) // 2
         
 
@@ -109,8 +114,6 @@ class TopoLayerNaive(nn.Module):
             # With 5x5 filters, and a 60 pixel wide image, we can run 144 image patches in parallel.
             # To do the whole set of filters, we nudge the image by 1 (using roll), and run the appropriate filters. 
             # Thus, a whole image can be run in 25 passes.
-
-            # assert X_.shape[2] % self.kernel_size == 0
             weights_padded = torch.zeros(self.weights.shape[0],
                                          self.weights.shape[1],
                                          next_multiple(self.weights.shape[2] + 2 * pad_size, self.kernel_size),
@@ -149,7 +152,6 @@ class TopoLayerNaive(nn.Module):
                     X_out[:, :, :, :, n] = Xr
                     n += 1
 
-            #X_out = torch.stack(results, dim=4)
             X_out = X_out.reshape(
                 X.shape[0], self.channels_out, X_.shape[2] // self.kernel_size, X_.shape[3] // self.kernel_size, 
                 self.kernel_size, self.kernel_size
@@ -159,13 +161,6 @@ class TopoLayerNaive(nn.Module):
             # Use a standard fully connected matrix product
             # X has shape batch_size, ndim, height, width
             # Hence, the create a matrix product of size [batch_size x (ndim, height, width)] x [(in_dim, height, width) x (out_dim, height, width)]
-            #self.weights = nn.Parameter(stddev * torch.randn(self.channels_out, 
-            #                        self.channels_in, 
-            #                        self.h,
-            #                        self.h,
-            #                        self.kernel_size, 
-            #                        self.kernel_size))
-
             W = torch.zeros(self.channels_in, X_.shape[2], X_.shape[3], self.channels_out, self.h, self.h, dtype=X.dtype, device=X.device)
             w_ = torch.permute(self.weights, (1, 4, 5, 0, 2, 3))
 
@@ -256,9 +251,6 @@ class TopoLayerNaive(nn.Module):
 
             idx = (torch.floor(idxs0 / 8) * nb + torch.floor(idxs1 / 8)).to(dtype=torch.long)
 
-            #print(idx.dtype)
-            #print(idx[:10])
-
             sparsity_pattern = torch.zeros((na, nb), dtype=X_.dtype, device=X_.device)
             sparsity_pattern[idx] = 1
 
@@ -287,12 +279,15 @@ class TopoLayerNaive(nn.Module):
             X_out = mm(X_.reshape(X_.shape[0], -1), blocks)
             X_out = X_out.reshape(X_out.shape[0], self.channels_out, self.h, self.h)
 
+        if self.bias_:
+            X_out += self.bias.reshape(1, -1, 1, 1)
+
         return X_out
 
 if __name__ == '__main__':
     h = 24
     X = torch.randn(512, 8, h, h)
-    layer = TopoLayerNaive(8, 32, 5, 1, h)
+    layer = TopLayer(8, 32, 5, 1, h)
 
     # This is 10 times slower than cuda, no need to beat a dead horse
     # t0 = benchmark.Timer('layer(X)', globals={'X': X, 'layer': layer})

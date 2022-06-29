@@ -1,3 +1,6 @@
 /matmul.py
 /naive.png
 /tiled.png
+runs
+wandb
+__pycache__
