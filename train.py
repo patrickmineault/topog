@@ -1,3 +1,4 @@
+import click
 from topnet import TopNet18
 import wandb
 
@@ -15,6 +16,7 @@ from tqdm import tqdm
 from torch import optim
 from torch.utils.tensorboard import SummaryWriter
 from torchvision.datasets import CIFAR100
+from torchvision.models import resnet
 from torch import nn
 from torch_ema import ExponentialMovingAverage
 
@@ -63,13 +65,21 @@ class ImageNetLowRes(Dataset):
         assert self.X.shape[0] == self.y.shape[0]
         return self.X.shape[0]
 
-
-def main():
+@click.command
+@click.option('--in_planes', default=8)
+@click.option('--use_conv_ops', default=False)
+@click.option('--use_maxpool', default=True)
+@click.option('--use_resnet', default=False)
+@click.option('--learning_rate', default="1e-3")
+def main(**params):
     wandb.init(project="topog", entity="pmin")
 
     wandb.config = {
-        "version": "initial"
+        "version": "initial",
+        **params
     }
+
+    print(params)
 
     train_transform = transforms.Compose(
         [
@@ -91,15 +101,25 @@ def main():
     train_dataset = ImageNetLowRes('/home/pmin/hdd/imagenet64', 'train', transform=train_transform)
     test_dataset = ImageNetLowRes('/home/pmin/hdd/imagenet64', 'val', transform=test_transform)
 
-    net = TopNet18()
+    if params.get('use_resnet'):
+        net = resnet.resnet18()
+    else:
+        net = TopNet18(use_maxpool=params['use_maxpool'], 
+                       use_conv_ops=params['use_conv_ops'],
+                       in_planes=params['in_planes'])
     net = net.to(device='cuda')
     writer = SummaryWriter()
 
-    train_loader = DataLoader(train_dataset, batch_size=2048, shuffle=True, pin_memory=True, num_workers=2)
-    test_loader = DataLoader(test_dataset, batch_size=2048, shuffle=True, pin_memory=True, num_workers=2)
+    if params['in_planes'] >= 32:
+        batch_size = 1024
+    else:
+        batch_size = 2048
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=2)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=2)
 
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(net.parameters(), lr=0.001)
+    optimizer = optim.Adam(net.parameters(), lr=float(params['learning_rate']))
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer=optimizer, factor=.3, patience=5)
 
     ema = ExponentialMovingAverage(net.parameters(), decay=0.995)
@@ -154,10 +174,17 @@ def main():
             scheduler.step(running_loss)
                 
         if epoch % 5 == 4:
-            torch.save(net.state_dict(), f'/home/pmin/hdd/checkpoints/imagenet_ema_rn_trunc_epoch{epoch}.pt')
+            torch.save(net.state_dict(), f'/home/pmin/hdd/checkpoints/imagenet64_{params_to_str(params)}_{epoch}.pt')
 
     wandb.finish()
 
 
+def params_to_str(params):
+    return '_'.join([f"{str(k)}_{str(v)}" for k, v in params.items()])
+
+
 if __name__ == '__main__':
+    #params = {'use_conv_ops': True,
+    #          'use_maxpool': True}
+    #params = {'use_resnet': True}
     main()

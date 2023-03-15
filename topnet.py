@@ -3,52 +3,6 @@ import torch
 from torch import nn, Tensor
 from typing import Union, Type, List, Optional, Callable
 
-class Conv3x3(nn.Module):
-    def __init__(self,
-        in_channels,
-        out_channels,
-        stride,
-        input_size,
-    ):
-        super().__init__()
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.stride = stride
-        self.input_size = input_size
-
-        # Note that 3x3 kernels are replaced by 2x2 when stride > 1
-        if stride == 1:
-            kern_size = 3
-        else:
-            kern_size = 1
-        self.topolayer = toplayer.TopLayer(in_channels * stride ** 2, out_channels, kern_size, 1, input_size // stride, bias=False)
-
-    def forward(self, X):
-        if self.stride != 1:
-            X = X.reshape(X.shape[0], X.shape[1], X.shape[2] // self.stride, self.stride, X.shape[3]//self.stride, self.stride)
-            X = X.permute(0, 1, 3, 5, 2, 4).reshape(X.shape[0], X.shape[1] * self.stride ** 2, X.shape[2], X.shape[4])
-        
-        return self.topolayer(X)
-
-
-class Conv1x1(nn.Module):
-    def __init__(self,
-        in_channels,
-        out_channels,
-        stride,
-        input_size,
-    ):
-        super().__init__()
-        assert stride > 1
-        self.in_channels = in_channels
-        self.stride = stride
-        self.topolayer = toplayer.TopLayer(in_channels * stride ** 2, out_channels, 1, 1, input_size, bias=False)
-        
-
-    def forward(self, X):
-        X = X.reshape(X.shape[0], X.shape[1], X.shape[2]//self.stride, 2, X.shape[3]//self.stride, 2)
-        X = X.permute(0, 1, 3, 5, 2, 4).reshape(X.shape[0], X.shape[1] * self.stride ** 2, X.shape[2], X.shape[4])
-        return self.topolayer(X)
 
 class DownsampleUnstack(nn.Module):
     def __init__(self, stride):
@@ -56,14 +10,14 @@ class DownsampleUnstack(nn.Module):
         self.stride = stride
 
     def forward(self, X):
-        X = X.reshape(X.shape[0], X.shape[1], X.shape[2]//self.stride, 2, X.shape[3]//self.stride, 2)
+        X = X.reshape(X.shape[0], X.shape[1], X.shape[2]//self.stride, self.stride, X.shape[3]//self.stride, self.stride)
         X = X.permute(0, 1, 3, 5, 2, 4).reshape(X.shape[0], X.shape[1] * self.stride ** 2, X.shape[2], X.shape[4])
         return X
 
     def extra_repr(self) -> str:
         return f"stride={self.stride}"
 
-def conv1x1(
+def top1x1(
         in_channels,
         out_channels,
         stride,
@@ -75,7 +29,7 @@ def conv1x1(
         toplayer.TopLayer(in_channels * stride ** 2, out_channels, 1, 1, input_size, bias=False)
     )
 
-def conv3x3(
+def top3x3(
         in_channels,
         out_channels,
         stride,
@@ -94,6 +48,25 @@ def conv3x3(
             toplayer.TopLayer(in_channels * stride ** 2, out_channels, kern_size, 1, input_size // stride, bias=False)
         )
 
+def conv3x3(in_planes: int, out_planes: int, stride: int = 1, input_size=None, groups: int = 1, dilation: int = 1) -> nn.Conv2d:
+    """3x3 convolution with padding"""
+    return nn.Conv2d(
+        in_planes,
+        out_planes,
+        kernel_size=3,
+        stride=stride,
+        padding=dilation,
+        groups=groups,
+        bias=False,
+        dilation=dilation,
+    )
+
+
+def conv1x1(in_planes: int, out_planes: int, stride: int = 1, input_size=None) -> nn.Conv2d:
+    """1x1 convolution"""
+    return nn.Conv2d(in_planes, out_planes, kernel_size=1, stride=stride, bias=False)
+
+
 
 class BasicBlock(nn.Module):
     expansion: int = 1
@@ -108,9 +81,13 @@ class BasicBlock(nn.Module):
         base_width: int = 64,
         dilation: int = 1,
         norm_layer: Optional[Callable[..., nn.Module]] = None,
-        input_size: int = None
+        input_size: int = None,
+        op_3x3 = None
     ) -> None:
         super().__init__()
+        if op_3x3 is None:
+            op_3x3 = top3x3
+
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
         if groups != 1 or base_width != 64:
@@ -118,11 +95,11 @@ class BasicBlock(nn.Module):
         if dilation > 1:
             raise NotImplementedError("Dilation > 1 not supported in BasicBlock")
         # Both self.conv1 and self.downsample layers downsample the input when stride != 1
-        self.conv1 = conv3x3(in_planes, planes, stride, input_size=input_size)
+        self.conv1 = op_3x3(in_planes, planes, stride, input_size=input_size)
         self.bn1 = norm_layer(planes)
         self.relu = nn.ReLU(inplace=True)
         
-        self.conv2 = conv3x3(planes, planes, stride=1, input_size=input_size // stride)
+        self.conv2 = op_3x3(planes, planes, stride=1, input_size=input_size // stride)
         self.bn2 = norm_layer(planes)
         self.downsample = downsample
         self.stride = stride
@@ -177,10 +154,11 @@ class TopNet(nn.Module):
         input_size: int = 64,
         use_maxpool: bool = True,
         in_planes: int = 8,
+        use_conv_ops: bool = False
     ) -> None:
         super().__init__()
 
-        assert input_size % 32 == 0, "input_size must be divisible by 32"
+        #assert input_size % 32 == 0, "input_size must be divisible by 32"
         
         norm_layer = nn.BatchNorm2d
         self._norm_layer = norm_layer
@@ -199,10 +177,10 @@ class TopNet(nn.Module):
         self.use_maxpool = use_maxpool
         if self.use_maxpool:
             self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
-        self.layer1 = self._make_layer(block, in_planes, layers[0], input_size=input_size//4)
-        self.layer2 = self._make_layer(block, in_planes * 2, layers[1], stride=2, input_size=input_size//4)
-        self.layer3 = self._make_layer(block, in_planes * 4, layers[2], stride=2, input_size=input_size//8)
-        self.layer4 = self._make_layer(block, in_planes * 8, layers[3], stride=2, input_size=input_size//16)
+        self.layer1 = self._make_layer(block, in_planes, layers[0], input_size=input_size//4, use_conv_ops=use_conv_ops)
+        self.layer2 = self._make_layer(block, in_planes * 2, layers[1], stride=2, input_size=input_size//4, use_conv_ops=use_conv_ops)
+        self.layer3 = self._make_layer(block, in_planes * 4, layers[2], stride=2, input_size=input_size//8, use_conv_ops=use_conv_ops)
+        self.layer4 = self._make_layer(block, in_planes * 8, layers[3], stride=2, input_size=input_size//16, use_conv_ops=use_conv_ops)
 
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
         self.fc = nn.Linear(8 * in_planes * block.expansion, num_classes)
@@ -220,15 +198,21 @@ class TopNet(nn.Module):
         planes: int,
         blocks: int,
         stride: int = 1,
-        input_size: int = None
+        input_size: int = None,
+        use_conv_ops = False
     ) -> nn.Sequential:
+        if use_conv_ops:
+            op_3x3 = conv3x3
+        else:
+            op_3x3 = top3x3
+
         norm_layer = self._norm_layer
         downsample = None
         previous_dilation = self.dilation
         input_size_2 = input_size
         if stride != 1 or self.in_planes != planes * block.expansion:
             downsample = nn.Sequential(
-                conv1x1(self.in_planes, planes * block.expansion, stride, input_size // stride),
+                top1x1(self.in_planes, planes * block.expansion, stride, input_size // stride),
                 norm_layer(planes * block.expansion),
             )
             input_size_2 = input_size // stride
@@ -236,7 +220,7 @@ class TopNet(nn.Module):
         layers = []
         layers.append(
             block(
-                self.in_planes, planes, stride, downsample, self.groups, self.base_width, previous_dilation, norm_layer, input_size
+                self.in_planes, planes, stride, downsample, self.groups, self.base_width, previous_dilation, norm_layer, input_size, op_3x3
             )
         )
 
@@ -251,7 +235,8 @@ class TopNet(nn.Module):
                     base_width=self.base_width,
                     dilation=self.dilation,
                     norm_layer=norm_layer,
-                    input_size=input_size_2
+                    input_size=input_size_2,
+                    op_3x3=op_3x3
                 )
             )
 
@@ -263,8 +248,11 @@ class TopNet(nn.Module):
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.relu(x)
+
         if self.use_maxpool:
             x = self.maxpool(x)
+        else:
+            x = x[:, :, ::2, ::2]
 
         x = self.layer1(x)
         x = self.layer2(x)
@@ -281,8 +269,8 @@ class TopNet(nn.Module):
         return self._forward_impl(x)
 
 
-def TopNet18(input_size=64, in_planes=8):
-    return TopNet(BasicBlock, [2, 2, 2, 2], input_size=input_size, in_planes=in_planes)
+def TopNet18(input_size=64, in_planes=8, use_maxpool=True, use_conv_ops=False):
+    return TopNet(BasicBlock, [2, 2, 2, 2], input_size=input_size, in_planes=in_planes, use_maxpool=use_maxpool, use_conv_ops=use_conv_ops)
 
 
 if __name__ == '__main__':
@@ -294,9 +282,11 @@ if __name__ == '__main__':
     # Base width.
     import time
 
-    net = TopNet18(in_planes=16)
+    input_size = 48
+    in_planes = 5
+    net = TopNet18(in_planes=in_planes, input_size=input_size)
     net.to(device='cuda')
-    X = torch.randn(64, 3, 64, 64, device='cuda')
+    X = torch.randn(64, 3, input_size, input_size, device='cuda')
     net(X)
 
     """
